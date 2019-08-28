@@ -1,0 +1,959 @@
+#添加最短路径算法
+#Add shortest path algorithm for service function selection
+
+
+From 64999f54b068e60ed0e250e7951bc601312e508f Mon Sep 17 00:00:00 2001
+From: Yi Yang <yi.y.yang@intel.com>
+Date: Wed, 15 Apr 2015 13:42:19 +0000
+Subject: [PATCH] Add shortest path algorithm for service function selection
+
+Change-Id: Ia7acb96bd8bc60b740ada2036986ac4de76f22be
+Signed-off-by: Shuqiang Zhao <shuqiangx.zhao@intel.com>
+Signed-off-by: Yi Yang <yi.y.yang@intel.com>
+
+
+diff --git a/sfc-model/src/main/yang/service-function-forwarder.yang b/sfc-model/src/main/yang/service-function-forwarder.yang
+index c6492e0..3b8acd1 100644
+--- a/sfc-model/src/main/yang/service-function-forwarder.yang
++++ b/sfc-model/src/main/yang/service-function-forwarder.yang
+@@ -179,6 +179,39 @@
+         description
+           "A list of all Service Functions attached to this SFF.";
+       }
++
++      list connected-sff-dictionary {
++        key "name";
++        leaf name {
++          type string;
++          description
++            "The name of the SFF connected to this SFF";
++        }
++        container sff-sff-data-plane-locator {
++          description
++            "The SFF uses this data plane locator when sending packets to the
++             associated SFF";
++          uses sfc-sl:data-plane-locator;
++        }
++        list sff-interfaces {
++          key "sff-interface";
++          leaf sff-interface {
++            type string;
++            description
++              "An individual SFF interface connected to this SFF";
++          }
++          description
++            "A list of SFF interfaces connected to this SFF";
++        }
++        leaf failmode {
++          type failmode-type;
++          description
++            "This leaf defines what the SFF should do if it can not
++             send packets to a connected SFF";
++        }
++        description
++          "A list of all Service Function Forwarders connected to this SFF";
++      }
+     }
+   }
+
+@@ -216,7 +249,3 @@
+     }
+   }
+ }
+-
+-
+-
+-
+diff --git a/sfc-provider/src/main/java/org/opendaylight/sfc/provider/api/SfcProviderRenderedPathAPI.java b/sfc-provider/src/main/java/org/opendaylight/sfc/provider/api/SfcProviderRenderedPathAPI.java
+index d00c9df..a80f3fa 100644
+--- a/sfc-provider/src/main/java/org/opendaylight/sfc/provider/api/SfcProviderRenderedPathAPI.java
++++ b/sfc-provider/src/main/java/org/opendaylight/sfc/provider/api/SfcProviderRenderedPathAPI.java
+@@ -44,6 +44,7 @@
+ import org.opendaylight.yang.gen.v1.urn.intel.params.xml.ns.yang.sfc.sfst.rev150312.Random;
+ import org.opendaylight.yang.gen.v1.urn.intel.params.xml.ns.yang.sfc.sfst.rev150312.RoundRobin;
+ import org.opendaylight.yang.gen.v1.urn.intel.params.xml.ns.yang.sfc.sfst.rev150312.LoadBalance;
++import org.opendaylight.yang.gen.v1.urn.intel.params.xml.ns.yang.sfc.sfst.rev150312.ShortestPath;
+
+ import java.util.ArrayList;
+ import java.util.Comparator;
+@@ -107,6 +108,8 @@
+             scheduler = new SfcServiceFunctionLoadBalanceSchedulerAPI();
+         } else if (serviceFunctionSchedulerType == Random.class) {
+             scheduler = new SfcServiceFunctionRandomSchedulerAPI();
++        } else if (serviceFunctionSchedulerType == ShortestPath.class) {
++            scheduler = new SfcServiceFunctionShortestPathSchedulerAPI();
+         } else {
+             scheduler = new SfcServiceFunctionRandomSchedulerAPI();
+         }
+diff --git a/sfc-provider/src/main/java/org/opendaylight/sfc/provider/api/SfcProviderServiceForwarderAPI.java b/sfc-provider/src/main/java/org/opendaylight/sfc/provider/api/SfcProviderServiceForwarderAPI.java
+index df35809..51a39a6 100755
+--- a/sfc-provider/src/main/java/org/opendaylight/sfc/provider/api/SfcProviderServiceForwarderAPI.java
++++ b/sfc-provider/src/main/java/org/opendaylight/sfc/provider/api/SfcProviderServiceForwarderAPI.java
+@@ -379,6 +379,34 @@
+     }
+
+     /**
++     * This method creates an executor and reads all the Service Function
++     * Forwarders from SFC datastore
++     * <p>
++     * @param no
++     * @return ServiceFunctionForwarders object including all Service Function
++     * Forwarders
++     */
++    public static ServiceFunctionForwarders readAllServiceFunctionForwardersExecutor() {
++        printTraceStart(LOG);
++        ServiceFunctionForwarders ret = null;
++        Object[] servicePathObj = {};
++        Class[] servicePathClass = {};
++        SfcProviderServiceForwarderAPI sfcProviderServiceForwarderAPI = SfcProviderServiceForwarderAPI
++                .getReadAll(servicePathObj, servicePathClass);
++        Future future = ODL_SFC.getExecutor().submit(sfcProviderServiceForwarderAPI);
++        try {
++            ret = (ServiceFunctionForwarders) future.get();
++            LOG.debug("getReadAll: {}", future.get());
++        } catch (InterruptedException e) {
++            LOG.warn("failed to ...." , e);
++        } catch (ExecutionException e) {
++            LOG.warn("failed to ...." , e);
++        }
++        printTraceStop(LOG);
++        return ret;
++    }
++
++    /**
+      * Delete All Service Function Forwarders in the data store
+      * devices
+      * <p>
+diff --git a/sfc-provider/src/main/java/org/opendaylight/sfc/provider/api/SfcProviderServiceFunctionAPI.java b/sfc-provider/src/main/java/org/opendaylight/sfc/provider/api/SfcProviderServiceFunctionAPI.java
+index 55f8407..402eb6f 100755
+--- a/sfc-provider/src/main/java/org/opendaylight/sfc/provider/api/SfcProviderServiceFunctionAPI.java
++++ b/sfc-provider/src/main/java/org/opendaylight/sfc/provider/api/SfcProviderServiceFunctionAPI.java
+@@ -684,6 +684,33 @@
+         return sfs;
+     }
+
++    /**
++     * This method creates an executor and reads all the Service Functions
++     * from SFC datastore
++     * <p>
++     * @param no
++     * @return ServiceFunctions object including all Service Functions
++     */
++    public static ServiceFunctions readAllServiceFunctionsExecutor() {
++        printTraceStart(LOG);
++        ServiceFunctions ret = null;
++        Object[] servicePathObj = {};
++        Class[] servicePathClass = {};
++        SfcProviderServiceFunctionAPI sfcProviderServiceFunctionAPI = SfcProviderServiceFunctionAPI
++                .getReadAll(servicePathObj, servicePathClass);
++        Future future  = ODL_SFC.getExecutor().submit(sfcProviderServiceFunctionAPI);
++        try {
++            ret = (ServiceFunctions) future.get();
++            LOG.debug("getReadAll: {}", future.get());
++        } catch (InterruptedException e) {
++            LOG.warn("failed to ...." , e);
++        } catch (ExecutionException e) {
++            LOG.warn("failed to ...." , e);
++        }
++        printTraceStop(LOG);
++        return ret;
++    }
++
+     protected boolean deleteAllServiceFunctions() {
+         boolean ret = false;
+         printTraceStart(LOG);
+diff --git a/sfc-provider/src/main/java/org/opendaylight/sfc/provider/api/SfcServiceFunctionShortestPathSchedulerAPI.java b/sfc-provider/src/main/java/org/opendaylight/sfc/provider/api/SfcServiceFunctionShortestPathSchedulerAPI.java
+new file mode 100644
+index 0000000..9878ab1
+--- /dev/null
++++ b/sfc-provider/src/main/java/org/opendaylight/sfc/provider/api/SfcServiceFunctionShortestPathSchedulerAPI.java
+@@ -0,0 +1,230 @@
++/*
++ * Copyright (c) 2015 Intel Ltd. and others.  All rights reserved.
++ *
++ * This program and the accompanying materials are made available under the
++ * terms of the Eclipse Public License v1.0 which accompanies this distribution,
++ * and is available at http://www.eclipse.org/legal/epl-v10.html
++ */
++
++package org.opendaylight.sfc.provider.api;
++
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sfc.rev140701.service.function.chain.grouping.ServiceFunctionChain;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sfc.rev140701.service.function.chain.grouping.service.function.chain.SfcServiceFunction;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sft.rev140701.service.function.types.ServiceFunctionType;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sft.rev140701.service.function.types.service.function.type.SftServiceFunctionName;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sff.rev140701.service.function.forwarders.service.function.forwarder.ConnectedSffDictionary;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sff.rev140701.service.function.forwarders.service.function.forwarder.ServiceFunctionDictionary;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sf.rev140701.service.functions.ServiceFunction;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sf.rev140701.ServiceFunctions;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sff.rev140701.ServiceFunctionForwarders;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sff.rev140701.service.function.forwarders.ServiceFunctionForwarder;
++import org.opendaylight.sfc.provider.topology.SfcProviderGraph;
++import org.opendaylight.sfc.provider.topology.SfcProviderTopologyNode;
++
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Random;
++
++/**
++ * This class implements shortest path scheduling mode.
++ * <p/>
++ *
++ * @author Shuqiang Zhao (shuqiangx.zhao@intel.com)
++ * @author Yi Yang (yi.y.yang@intel.com)
++ *
++ * <p/>
++ * @since 2015-03-13
++ */
++public class SfcServiceFunctionShortestPathSchedulerAPI extends SfcServiceFunctionSchedulerAPI {
++    private static final Logger LOG = LoggerFactory.getLogger(SfcServiceFunctionShortestPathSchedulerAPI.class);
++    SfcServiceFunctionShortestPathSchedulerAPI() {
++        super.setSfcServiceFunctionSchedulerType(org.opendaylight.yang.gen.v1.urn.intel.params.xml.ns.yang.sfc.sfst.rev150312.ShortestPath.class);
++    }
++
++    /**
++     * This method finds out name of the Service Function closest to
++     * Service Function preSfName per serviceFunctionType.
++     *
++     * <p>
++     * @param serviceFunctionType Type of Service Function to find
++     * @param preSfName Name of previous Service Function in Service Function Path
++     * @param sfcProviderGraph Topology graph comprised of all the SFs and SFFs
++     * @return String Name of the Service Function with type serviceFunctionType
++     */
++    private String getServiceFunctionByType(ServiceFunctionType serviceFunctionType, String preSfName, SfcProviderGraph sfcProviderGraph) {
++        String sfcProviderTopologyNodeName = null;
++        List<SftServiceFunctionName> sftServiceFunctionNameList = serviceFunctionType.getSftServiceFunctionName();
++
++        /* Return null if sftServiceFunctionNameList is empty */
++        if (sftServiceFunctionNameList.size() == 0) {
++            LOG.debug("No Service Function for {}", serviceFunctionType);
++            return null;
++        }
++
++
++        /* Randomly find one instance of serviceFunctionType
++         * and return its name if preSfName is null
++         */
++        if (preSfName == null) {
++            /* Randomly find one instance of serviceFunctionType */
++            Random rad = new Random();
++            sfcProviderTopologyNodeName = sftServiceFunctionNameList.get(rad.nextInt(sftServiceFunctionNameList.size())).getName();
++            LOG.debug("The first ServiceFunction name: {}", sfcProviderTopologyNodeName);
++            return sfcProviderTopologyNodeName; //The first hop
++        }
++
++        SfcProviderTopologyNode preSfcProviderTopologyNode = sfcProviderGraph.getNode(preSfName);
++
++        /* return null if preSfName doesn't exist in sfcProviderGraph */
++        if (preSfcProviderTopologyNode == null) {
++            LOG.debug("Node {} doesn't exist", preSfName);
++            return null;
++        }
++
++        /* Find one instance of serviceFunctionType closest to preSfName */
++        int minLength = Integer.MAX_VALUE;
++        int length = 0;
++        sfcProviderTopologyNodeName = null;
++        for (SftServiceFunctionName sftServiceFunctionName : sftServiceFunctionNameList) {
++            String curSfName = sftServiceFunctionName.getName();
++            List<SfcProviderTopologyNode> sfcProviderTopologyNodeList = sfcProviderGraph.getShortestPath(preSfName, curSfName);
++            length = sfcProviderTopologyNodeList.size();
++            if (length <= 1) {
++                LOG.debug("No path from {} to {}", preSfName, curSfName);
++                continue;
++            }
++            if (minLength > length)
++            {
++                minLength = length;
++                sfcProviderTopologyNodeName = curSfName;
++            }
++        }
++
++        /* sfcProviderTopologyNodeName will be null
++         * if the next hop can't be found.
++         */
++        if (sfcProviderTopologyNodeName == null) {
++            LOG.debug("Next hop of {} doesn't exist", preSfName);
++        }
++        return sfcProviderTopologyNodeName;
++    }
++
++    /**
++     * This method builds a SfcProviderGraph comprised of
++     * all the SFs and SFFs. sfcProviderGraph will store
++     * all the info about vertex/node and edge.
++     *
++     * <p>
++     * @param sfcProviderGraph input and output of this method
++     * @return void
++     */
++    private void buildTopologyGraph(SfcProviderGraph sfcProviderGraph)
++    {
++        String sfName;
++        String sffName;
++        String toSffName;
++
++        /* Add all the ServiceFunction nodes */
++        ServiceFunctions sfs =  SfcProviderServiceFunctionAPI.readAllServiceFunctionsExecutor();
++        List<ServiceFunction> serviceFunctionList = sfs.getServiceFunction();
++        for (ServiceFunction serviceFunction : serviceFunctionList) {
++            sfName = serviceFunction.getName();
++            sfcProviderGraph.addNode(sfName);
++            LOG.debug("Add ServiceFunction: {}", sfName);
++        }
++
++        ServiceFunctionForwarders sffs = SfcProviderServiceForwarderAPI.readAllServiceFunctionForwardersExecutor();
++        List<ServiceFunctionForwarder> serviceFunctionForwarderList = sffs.getServiceFunctionForwarder();
++
++        /* Add edges and node for every ServiceFunctionForwarder */
++        for (ServiceFunctionForwarder serviceFunctionForwarder : serviceFunctionForwarderList) {
++            /* Add ServiceFunctionForwarder node */
++            sffName = serviceFunctionForwarder.getName();
++            sfcProviderGraph.addNode(sffName);
++            LOG.debug("Add ServiceFunctionForwarder: {}", sffName);
++
++            List<ServiceFunctionDictionary> serviceFunctionDictionaryList = serviceFunctionForwarder.getServiceFunctionDictionary();
++
++            /* Add edge for every ServiceFunction attached
++             * to serviceFunctionForwarder
++             */
++            for (ServiceFunctionDictionary serviceFunctionDictionary : serviceFunctionDictionaryList) {
++                sfName = serviceFunctionDictionary.getName();
++                sfcProviderGraph.addEdge(sfName, sffName);
++                LOG.debug("Add SF-to-SFF edge: {} => {}", sfName, sffName);
++            }
++
++            List<ConnectedSffDictionary> connectedSffDictionaryList = serviceFunctionForwarder.getConnectedSffDictionary();
++
++            /* Add edge for every ServiceFunctionForwarder connected
++             * to serviceFunctionForwarder
++             */
++            for (ConnectedSffDictionary connectedSffDictionary : connectedSffDictionaryList) {
++                toSffName = connectedSffDictionary.getName();
++                sfcProviderGraph.addEdge(sffName, toSffName);
++                LOG.debug("Add SFF-to-SFF edge: {} => {}", sffName, toSffName);
++            }
++        }
++    }
++
++    /**
++     * This method finds out the shortest Service Function Path
++     * for the given Service Function Chain chain, any two adjacent
++     * Service Functions in this Service Function Path have the
++     * shortest distance compared to other two Service Functions
++     * with same Service Function Types.
++     *
++     * <p>
++     * @param chain Service Function Chain to render
++     * @param serviceIndex Not used currently
++     * @return List<String> Service Funtion name list in the shortest path
++     */
++    public List<String> scheduleServiceFuntions(ServiceFunctionChain chain, int serviceIndex) {
++        String preSfName = null;
++        String sfName = null;
++        List<String> sfNameList = new ArrayList<>();
++        List<SfcServiceFunction> sfcServiceFunctionList = new ArrayList<>();
++        sfcServiceFunctionList.addAll(chain.getSfcServiceFunction());
++        SfcProviderGraph sfcProviderGraph = new SfcProviderGraph();
++
++        /* Build topology graph for all the nodes,
++         * including every ServiceFunction and ServiceFunctionForwarder
++         */
++        buildTopologyGraph(sfcProviderGraph);
++
++        /* Select a SF instance closest to previous hop in SFP
++         * for each ServiceFunction type in sfcServiceFunctionList.
++         */
++        for (SfcServiceFunction sfcServiceFunction : sfcServiceFunctionList) {
++            LOG.debug("ServiceFunction name: {}", sfcServiceFunction.getName());
++
++            ServiceFunctionType serviceFunctionType = SfcProviderServiceTypeAPI.readServiceFunctionTypeExecutor(sfcServiceFunction.getType());
++            if (serviceFunctionType != null) {
++                List<SftServiceFunctionName> sftServiceFunctionNameList = serviceFunctionType.getSftServiceFunctionName();
++                if (!sftServiceFunctionNameList.isEmpty()) {
++                    sfName = getServiceFunctionByType(serviceFunctionType,
++                                                      preSfName,
++                                                      sfcProviderGraph);
++                    if (sfName != null) {
++                        sfNameList.add(sfName);
++                        preSfName = sfName;
++                        LOG.debug("Next Service Function: {}", sfName);
++                    } else {
++                        LOG.error("Couldn't find a reachable SF for ServiceFuntionType: {}", sfcServiceFunction.getType());
++                        return null;
++                    }
++                } else {
++                    LOG.debug("No {} Service Function instance", sfcServiceFunction.getName());
++                    return null;
++                }
++            } else {
++                LOG.debug("No {} Service Function type", sfcServiceFunction.getName());
++                return null;
++            }
++        }
++        return sfNameList;
++    }
++}
+diff --git a/sfc-provider/src/main/java/org/opendaylight/sfc/provider/topology/SfcProviderGraph.java b/sfc-provider/src/main/java/org/opendaylight/sfc/provider/topology/SfcProviderGraph.java
+new file mode 100644
+index 0000000..d208cde
+--- /dev/null
++++ b/sfc-provider/src/main/java/org/opendaylight/sfc/provider/topology/SfcProviderGraph.java
+@@ -0,0 +1,176 @@
++/*
++* Copyright (c) 2014 Intel Corporation. All rights reserved.
++*
++* This program and the accompanying materials are made available under the
++* terms of the Eclipse Public License v1.0 which accompanies this distribution,
++* and is available at http://www.eclipse.org/legal/epl-v10.html
++*/
++package org.opendaylight.sfc.provider.topology;
++
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++import java.util.List;
++import java.util.HashMap;
++import java.util.TreeSet;
++import java.util.Queue;
++import java.util.ArrayList;
++import java.util.LinkedList;
++
++/**
++ * This class represents a topology graph, node/vertex
++ * is a SF (Service Function) or SFF (Service Function Forwarder),
++ * edge is a unidirect and direct connection between two
++ * nodes/vertexes, it is mainly used to implement Dijkstra
++ * shortest path algorithm, method getShortestPath can find
++ * the shortest path between 'from' node and 'to' node in a graph.
++ * <p/>
++ *
++ * @author Shuqiang Zhao (shuqiangx.zhao@intel.com)
++ * @author Yi Yang (yi.y.yang@intel.com)
++ *
++ * <p/>
++ * @since 2015-03-13
++ */
++public class SfcProviderGraph {
++    private static final Logger LOG = LoggerFactory.getLogger(SfcProviderGraph.class);
++    private static final TreeSet<SfcProviderTopologyNode> EMPTY_SET = new TreeSet<SfcProviderTopologyNode>();
++    private static final int WHITE     = 2;
++    private static final int GRAY     = 1;
++    private static final int BLACK    = 0;
++    private static final int MAX    = 10000;
++
++    private HashMap<SfcProviderTopologyNode, TreeSet<SfcProviderTopologyNode>> sfcProviderTopoEdges;
++    private HashMap<String, SfcProviderTopologyNode> sfcProviderTopoNodes;
++    private int nodeNum;
++    private int edgeNum;
++
++    public SfcProviderGraph() {
++        sfcProviderTopoEdges = new HashMap<SfcProviderTopologyNode, TreeSet<SfcProviderTopologyNode>>();
++        sfcProviderTopoNodes = new HashMap<String, SfcProviderTopologyNode>();
++        nodeNum = 0;
++        edgeNum = 0;
++    }
++
++    public SfcProviderTopologyNode addNode(String nodeName) {
++        SfcProviderTopologyNode node;
++        node = sfcProviderTopoNodes.get(nodeName);
++        if (node == null) {
++            node = new SfcProviderTopologyNode(nodeName);
++            sfcProviderTopoNodes.put(nodeName, node);
++            sfcProviderTopoEdges.put(node, new TreeSet<SfcProviderTopologyNode>());
++            nodeNum++;
++        }
++        return node;
++    }
++
++    public SfcProviderTopologyNode getNode(String nodeName) {
++        return sfcProviderTopoNodes.get(nodeName);
++    }
++
++    public boolean hasNode(String nodeName) {
++        return sfcProviderTopoNodes.containsKey(nodeName);
++    }
++
++    public boolean hasEdge(String fromNodeName, String toNodeName) {
++        SfcProviderTopologyNode fromNode;
++        SfcProviderTopologyNode toNode;
++        if (!hasNode(fromNodeName) || !hasNode(toNodeName)) {
++            return false;
++        }
++        fromNode = sfcProviderTopoNodes.get(fromNodeName);
++        toNode = sfcProviderTopoNodes.get(toNodeName);
++        return sfcProviderTopoEdges.get(fromNode).contains(toNode);
++    }
++
++    public boolean addEdge(String fromNodeName, String toNodeName) {
++        SfcProviderTopologyNode fromNode;
++        SfcProviderTopologyNode toNode;
++
++        if (!hasEdge(fromNodeName, toNodeName)) {
++            fromNode = getNode(fromNodeName);
++            if (fromNode == null) {
++                fromNode = addNode(fromNodeName);
++            }
++            toNode = getNode(toNodeName);
++            if (toNode == null) {
++                toNode = addNode(toNodeName);
++            }
++            sfcProviderTopoEdges.get(fromNode).add(toNode);
++            sfcProviderTopoEdges.get(toNode).add(fromNode);
++        }
++        return true;
++    }
++
++    public Iterable<SfcProviderTopologyNode> getNeighborNodes(String nodeName) {
++        if (!hasNode(nodeName)) {
++            return EMPTY_SET;
++        }
++        return sfcProviderTopoEdges.get(getNode(nodeName));
++    }
++
++    public Iterable<SfcProviderTopologyNode> getAllNodes() {
++        return sfcProviderTopoNodes.values();
++    }
++
++    private void breadthFirstSearch(String fromNodeName) {
++        /* Reset all nodes' color, dist, parent */
++        for (SfcProviderTopologyNode sfcNode : getAllNodes()) {
++            sfcNode.setColor(WHITE);
++            sfcNode.setDist(0);
++            sfcNode.setParent(null);
++        }
++
++        /* Mark fromNode as GRAY */
++        SfcProviderTopologyNode sfcProviderTopologyNode = getNode(fromNodeName);
++        sfcProviderTopologyNode.setColor(GRAY);
++        sfcProviderTopologyNode.setDist(0);
++        sfcProviderTopologyNode.setParent(null);
++
++        Queue<SfcProviderTopologyNode> queue = new LinkedList<SfcProviderTopologyNode>();
++        queue.offer(sfcProviderTopologyNode);
++
++        while (!queue.isEmpty()) {
++            SfcProviderTopologyNode qSfcNode = queue.poll();
++            for (SfcProviderTopologyNode sfcNode : getNeighborNodes(qSfcNode.getName())) {
++                if (sfcNode.getColor() == WHITE) {
++                    sfcNode.setColor(GRAY);
++                    sfcNode.setDist(qSfcNode.getDist() + 1);
++                    queue.offer(sfcNode);
++                    sfcNode.setParent(qSfcNode);
++                }
++            }
++            qSfcNode.setColor(BLACK);
++        }
++        return;
++    }
++
++    public List<SfcProviderTopologyNode> getShortestPath(String fromNodeName, String toNodeName) {
++        SfcProviderTopologyNode fromNode = getNode(fromNodeName);
++        SfcProviderTopologyNode toNode = getNode(toNodeName);
++        if (fromNode == null || toNode == null) {
++            LOG.error(" Node {} or {} doesn't exist in topology graph!", fromNodeName, toNodeName);
++            return null;
++        }
++
++        List<SfcProviderTopologyNode> sfcProviderTopologyNodePath = new ArrayList<SfcProviderTopologyNode>();
++        if (fromNodeName.equals(toNodeName)) {
++            sfcProviderTopologyNodePath.add(0, fromNode);
++            return sfcProviderTopologyNodePath;
++        }
++
++        breadthFirstSearch(fromNodeName);
++        SfcProviderTopologyNode sfcProviderTopologyNode = getNode(toNodeName);
++        while (sfcProviderTopologyNode != null) {
++            sfcProviderTopologyNodePath.add(0, sfcProviderTopologyNode);
++            sfcProviderTopologyNode = sfcProviderTopologyNode.getParent();
++        }
++
++        /* No path if the first node isn't fromNode, so clear it. */
++        if (sfcProviderTopologyNodePath.size() != 0
++            && !sfcProviderTopologyNodePath.get(0).equals(fromNode)) {
++            sfcProviderTopologyNodePath.clear();
++        }
++        return sfcProviderTopologyNodePath;
++    }
++}
+diff --git a/sfc-provider/src/main/java/org/opendaylight/sfc/provider/topology/SfcProviderTopologyNode.java b/sfc-provider/src/main/java/org/opendaylight/sfc/provider/topology/SfcProviderTopologyNode.java
+new file mode 100644
+index 0000000..12e2228
+--- /dev/null
++++ b/sfc-provider/src/main/java/org/opendaylight/sfc/provider/topology/SfcProviderTopologyNode.java
+@@ -0,0 +1,75 @@
++/*
++* Copyright (c) 2014 Intel Corporation. All rights reserved.
++*
++* This program and the accompanying materials are made available under the
++* terms of the Eclipse Public License v1.0 which accompanies this distribution,
++* and is available at http://www.eclipse.org/legal/epl-v10.html
++*/
++package org.opendaylight.sfc.provider.topology;
++
++/**
++ * This class represents a node/vertex in topology graph
++ * that composes of SFs (Service Functions) and SFFs (Service Function Forwarders)
++ * , a node may be SF or SFF, please refer to class SfcProviderGraph for
++ * topology graph
++ *
++ * @author Shuqiang Zhao <shuqiangx.zhao@intel.com>
++ * @author Yi Yang <yi.y.yang@intel.com>
++ *
++ */
++public class SfcProviderTopologyNode implements Comparable<SfcProviderTopologyNode> {
++    private String name;
++    private int load;
++    private SfcProviderTopologyNode parent;
++    private int color;
++    private int dist;
++
++    public SfcProviderTopologyNode(String name)
++    {
++        this.name = name;
++        this.load = 0;
++        this.parent = null;
++        this.color = 0;
++        this.dist = 0;
++    }
++
++    public String getName() {
++        return this.name;
++    }
++
++    public SfcProviderTopologyNode getParent() {
++        return this.parent;
++    }
++
++    public void setParent(SfcProviderTopologyNode parent) {
++        this.parent = parent;
++    }
++
++    public int getColor() {
++        return this.color;
++    }
++
++    public void setColor(int color) {
++        this.color = color;
++    }
++
++    public int getDist() {
++        return this.dist;
++    }
++
++    public void setDist(int dist) {
++        this.dist = dist;
++    }
++
++    public int compareTo(SfcProviderTopologyNode node) {
++        return this.name.compareTo(node.getName());
++    }
++
++    public boolean equals(SfcProviderTopologyNode node) {
++        boolean flag = false;
++        if (this.name == node.getName()) {
++            flag = true;
++        }
++        return flag;
++    }
++}
+diff --git a/sfc-provider/src/test/java/org/opendaylight/sfc/provider/api/SfcServiceFunctionShortestPathSchedulerAPITest.java b/sfc-provider/src/test/java/org/opendaylight/sfc/provider/api/SfcServiceFunctionShortestPathSchedulerAPITest.java
+new file mode 100644
+index 0000000..8cf1b96
+--- /dev/null
++++ b/sfc-provider/src/test/java/org/opendaylight/sfc/provider/api/SfcServiceFunctionShortestPathSchedulerAPITest.java
+@@ -0,0 +1,290 @@
++/*
++ * Copyright (c) 2015 Intel Ltd. and others.  All rights reserved.
++ *
++ * This program and the accompanying materials are made available under the
++ * terms of the Eclipse Public License v1.0 which accompanies this distribution,
++ * and is available at http://www.eclipse.org/legal/epl-v10.html
++ */
++
++package org.opendaylight.sfc.provider.api;
++
++import org.junit.After;
++import org.junit.Before;
++import org.junit.Test;
++import org.opendaylight.controller.md.sal.binding.api.DataBroker;
++import org.opendaylight.controller.md.sal.binding.test.AbstractDataBrokerTest;
++import org.opendaylight.sfc.provider.OpendaylightSfc;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sff.rev140701.Open;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sf.rev140701.service.function.entry.SfDataPlaneLocator;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sf.rev140701.service.function.entry.SfDataPlaneLocatorBuilder;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sff.rev140701.service.function.forwarders.service.function.forwarder.SffDataPlaneLocator;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sff.rev140701.service.function.forwarders.service.function.forwarder.SffDataPlaneLocatorBuilder;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sff.rev140701.service.function.forwarders.service.function.forwarder.SffDataPlaneLocatorKey;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sff.rev140701.service.function.forwarders.service.function.forwarder.service.function.dictionary.SffSfDataPlaneLocator;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sff.rev140701.service.function.forwarders.service.function.forwarder.service.function.dictionary.SffSfDataPlaneLocatorBuilder;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sff.rev140701.service.function.forwarders.service.function.forwarder.sff.data.plane.locator.DataPlaneLocatorBuilder;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sf.rev140701.ServiceFunctions;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sf.rev140701.ServiceFunctionsBuilder;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sf.rev140701.service.functions.ServiceFunction;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sf.rev140701.service.functions.ServiceFunctionBuilder;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sf.rev140701.service.functions.ServiceFunctionKey;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sft.rev140701.service.function.types.ServiceFunctionType;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sff.rev140701.service.function.forwarders.ServiceFunctionForwarder;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sff.rev140701.service.function.forwarders.ServiceFunctionForwarderBuilder;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sff.rev140701.service.function.forwarders.ServiceFunctionForwarderKey;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sff.rev140701.service.function.forwarders.service.function.forwarder.ServiceFunctionDictionary;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sff.rev140701.service.function.forwarders.service.function.forwarder.ServiceFunctionDictionaryKey;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sff.rev140701.service.function.forwarders.service.function.forwarder.ServiceFunctionDictionaryBuilder;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sff.rev140701.service.function.forwarders.service.function.forwarder.ConnectedSffDictionary;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sff.rev140701.service.function.forwarders.service.function.forwarder.ConnectedSffDictionaryBuilder;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sfc.rev140701.service.function.chain.grouping.ServiceFunctionChain;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sfc.rev140701.service.function.chain.grouping.ServiceFunctionChainBuilder;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sfc.rev140701.service.function.chain.grouping.ServiceFunctionChainKey;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sfc.rev140701.service.function.chain.grouping.service.function.chain.SfcServiceFunction;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sfc.rev140701.service.function.chain.grouping.service.function.chain.SfcServiceFunctionBuilder;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sfc.rev140701.service.function.chain.grouping.service.function.chain.SfcServiceFunctionKey;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sft.rev140701.Firewall;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sft.rev140701.Dpi;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sft.rev140701.Napt44;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sl.rev140701.VxlanGpe;
++import org.opendaylight.yang.gen.v1.urn.cisco.params.xml.ns.yang.sfc.sl.rev140701.data.plane.locator.locator.type.IpBuilder;
++import org.opendaylight.yang.gen.v1.urn.ietf.params.xml.ns.yang.ietf.inet.types.rev100924.IpAddress;
++import org.opendaylight.yang.gen.v1.urn.ietf.params.xml.ns.yang.ietf.inet.types.rev100924.Ipv4Address;
++import org.opendaylight.yang.gen.v1.urn.ietf.params.xml.ns.yang.ietf.inet.types.rev100924.PortNumber;
++
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.concurrent.ExecutionException;
++import java.util.concurrent.ExecutorService;
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertNotNull;
++
++public class SfcServiceFunctionShortestPathSchedulerAPITest extends AbstractDataBrokerTest {
++
++    DataBroker dataBroker;
++    ExecutorService executor;
++    OpendaylightSfc opendaylightSfc = new OpendaylightSfc();
++    private static final Logger LOG = LoggerFactory.getLogger(SfcServiceFunctionShortestPathSchedulerAPITest.class);
++
++    List<SfDataPlaneLocator> sfDPLList = new ArrayList<>();
++    List<ServiceFunction> sfList = new ArrayList<>();
++    ServiceFunctionChain sfChain;
++
++    @Before
++    public void before() throws ExecutionException, InterruptedException {
++        dataBroker = getDataBroker();
++        opendaylightSfc.setDataProvider(dataBroker);
++        executor = opendaylightSfc.getExecutor();
++
++        //build SFs
++        final String[] LOCATOR_IP_ADDRESS =
++            {"196.168.55.1", "196.168.55.2", "196.168.55.3",
++             "196.168.55.4", "196.168.55.5", "196.168.55.6",
++             "196.168.55.7", "196.168.55.8", "196.168.55.9"
++            };
++        final String[] IP_MGMT_ADDRESS =
++            {"196.168.55.101", "196.168.55.102", "196.168.55.103",
++             "196.168.55.104", "196.168.55.105", "196.168.55.106",
++             "196.168.55.107", "196.168.55.108", "196.168.55.109"
++            };
++        final int PORT = 555;
++        final String[] SF_NAMES =
++            {"simple_firewall_100", "simple_napt_100", "simple_dpi_100",
++             "simple_firewall_110", "simple_napt_110", "simple_dpi_110",
++             "simple_firewall_120", "simple_napt_120", "simple_dpi_120"
++            };
++        final Class[] SF_TYPES =
++            {Firewall.class, Napt44.class, Dpi.class,
++             Firewall.class, Napt44.class, Dpi.class,
++             Firewall.class, Napt44.class, Dpi.class
++            };
++
++        PortNumber portNumber = new PortNumber(PORT);
++        for (int i = 0; i < SF_NAMES.length; i++) {
++            IpAddress ipMgmtAddr = new IpAddress(new Ipv4Address(IP_MGMT_ADDRESS[i]));
++            IpAddress dplIpAddr = new IpAddress(new Ipv4Address(LOCATOR_IP_ADDRESS[i]));
++            IpBuilder ipBuilder = new IpBuilder();
++            ipBuilder.setIp(dplIpAddr).setPort(portNumber);
++            SfDataPlaneLocatorBuilder locatorBuilder = new SfDataPlaneLocatorBuilder();
++            locatorBuilder.setName(LOCATOR_IP_ADDRESS[i])
++                          .setLocatorType(ipBuilder.build());
++            SfDataPlaneLocator sfDataPlaneLocator = locatorBuilder.build();
++            ServiceFunctionBuilder sfBuilder = new ServiceFunctionBuilder();
++            List<SfDataPlaneLocator> dataPlaneLocatorList = new ArrayList<>();
++            dataPlaneLocatorList.add(sfDataPlaneLocator);
++            ServiceFunctionKey serviceFunctonKey = new ServiceFunctionKey(SF_NAMES[i]);
++            sfBuilder.setName(SF_NAMES[i])
++                     .setKey(serviceFunctonKey)
++                     .setType(SF_TYPES[i])
++                     .setIpMgmtAddress(ipMgmtAddr)
++                     .setSfDataPlaneLocator(dataPlaneLocatorList);
++            sfList.add(sfBuilder.build());
++        }
++
++        ServiceFunctionsBuilder sfsBuilder = new ServiceFunctionsBuilder();
++        sfsBuilder.setServiceFunction(sfList);
++        executor.submit(SfcProviderServiceFunctionAPI.getPutAll
++                (new Object[]{sfsBuilder.build()}, new Class[]{ServiceFunctions.class})).get();
++
++        String sfcName = "ShortestPath-unittest-chain-1";
++        List<SfcServiceFunction> sfcServiceFunctionList = new ArrayList<>();
++        String[] sftNames = {"firewall", "napt", "dpi"};
++        Class[] sftClasses = {Firewall.class, Napt44.class, Dpi.class};
++        for (int i = 0; i < sftNames.length; i++) {
++            SfcServiceFunctionBuilder sfcServiceFunctionBuilder = new SfcServiceFunctionBuilder();
++            sfcServiceFunctionBuilder.setName(sftNames[i]);
++            sfcServiceFunctionBuilder.setKey(new SfcServiceFunctionKey(sftNames[i]));
++            sfcServiceFunctionBuilder.setType(sftClasses[i]);
++            sfcServiceFunctionList.add(sfcServiceFunctionBuilder.build());
++        }
++
++        sfChain = new ServiceFunctionChainBuilder()
++                  .setName(sfcName)
++                  .setKey(new ServiceFunctionChainKey(sfcName))
++                  .setSfcServiceFunction(sfcServiceFunctionList)
++                  .setSymmetric(false)
++                  .build();
++
++        // build SFFs
++        String[] SFF_NAMES = {"SFF1", "SFF2", "SFF3"};
++        String[][] TO_SFF_NAMES =
++            {{"SFF2", "SFF3"}, {"SFF3", "SFF1"}, {"SFF1", "SFF2"}};
++        String[] SFF_LOCATOR_IP =
++            {"196.168.66.101", "196.168.66.102", "196.168.66.103"};
++
++        for (int i = 0; i < SFF_NAMES.length; i++) {
++            //ServiceFunctionForwarders connected to SFF_NAMES[i]
++            List<ConnectedSffDictionary> sffDictionaryList = new ArrayList<>();
++            for (int j = 0; j < 2; j++) {
++                ConnectedSffDictionaryBuilder sffDictionaryEntryBuilder = new ConnectedSffDictionaryBuilder();
++                ConnectedSffDictionary sffDictEntry = sffDictionaryEntryBuilder.setName(TO_SFF_NAMES[i][j]).build();
++                sffDictionaryList.add(sffDictEntry);
++            }
++
++            //ServiceFunctions attached to SFF_NAMES[i]
++            List<ServiceFunctionDictionary> sfDictionaryList = new ArrayList<>();
++            for (int j = 0; j < 3; j++) {
++                ServiceFunction serviceFunction = sfList.get(i*3+j);
++                SfDataPlaneLocator sfDPLocator = serviceFunction.getSfDataPlaneLocator().get(0);
++                SffSfDataPlaneLocatorBuilder sffSfDataPlaneLocatorBuilder = new SffSfDataPlaneLocatorBuilder(sfDPLocator);
++                SffSfDataPlaneLocator sffSfDataPlaneLocator = sffSfDataPlaneLocatorBuilder.build();
++                ServiceFunctionDictionaryBuilder dictionaryEntryBuilder = new ServiceFunctionDictionaryBuilder();
++                dictionaryEntryBuilder.setName(serviceFunction.getName())
++                                      .setKey(new ServiceFunctionDictionaryKey(serviceFunction.getName()))
++                                      .setType(serviceFunction.getType())
++                                      .setSffSfDataPlaneLocator(sffSfDataPlaneLocator)
++                                      .setFailmode(Open.class)
++                                      .setSffInterfaces(null);
++                ServiceFunctionDictionary sfDictEntry = dictionaryEntryBuilder.build();
++                sfDictionaryList.add(sfDictEntry);
++            }
++
++            List<SffDataPlaneLocator> locatorList = new ArrayList<>();
++            IpBuilder ipBuilder = new IpBuilder();
++            ipBuilder.setIp(new IpAddress(new Ipv4Address(SFF_LOCATOR_IP[i])))
++                     .setPort(new PortNumber(555));
++            DataPlaneLocatorBuilder sffLocatorBuilder = new DataPlaneLocatorBuilder();
++            sffLocatorBuilder.setLocatorType(ipBuilder.build())
++                             .setTransport(VxlanGpe.class);
++            SffDataPlaneLocatorBuilder locatorBuilder = new SffDataPlaneLocatorBuilder();
++            locatorBuilder.setName(SFF_LOCATOR_IP[i])
++                          .setKey(new SffDataPlaneLocatorKey(SFF_LOCATOR_IP[i]))
++                          .setDataPlaneLocator(sffLocatorBuilder.build());
++            locatorList.add(locatorBuilder.build());
++            ServiceFunctionForwarderBuilder sffBuilder = new ServiceFunctionForwarderBuilder();
++            sffBuilder.setName(SFF_NAMES[i])
++                      .setKey(new ServiceFunctionForwarderKey(SFF_NAMES[i]))
++                      .setSffDataPlaneLocator(locatorList)
++                      .setServiceFunctionDictionary(sfDictionaryList)
++                      .setConnectedSffDictionary(sffDictionaryList)
++                      .setServiceNode(null);
++            ServiceFunctionForwarder sff = sffBuilder.build();
++            executor.submit(SfcProviderServiceForwarderAPI.getPut(new Object[]{sff}, new Class[]{ServiceFunctionForwarder.class})).get();
++        }
++    }
++
++    @After
++    public void after() {
++        executor.submit(SfcProviderServicePathAPI.getDeleteAll(new Object[]{}, new Class[]{}));
++        executor.submit(SfcProviderServiceChainAPI.getDeleteAll(new Object[]{}, new Class[]{}));
++        executor.submit(SfcProviderServiceFunctionAPI.getDeleteAll(new Object[]{}, new Class[]{}));
++        executor.submit(SfcProviderServiceForwarderAPI.getDeleteAll(new Object[]{}, new Class[]{}));
++        executor.submit(SfcProviderServiceTypeAPI.getDeleteAll(new Object[]{}, new Class[]{}));
++    }
++
++    @Test
++    public void testSfcServiceFunctionShortestPathScheduler() throws ExecutionException, InterruptedException {
++        dataBroker = getDataBroker();
++        opendaylightSfc.setDataProvider(dataBroker);
++        executor = opendaylightSfc.getExecutor();
++
++        /* Must create ServiceFunctionType first */
++        for (ServiceFunction serviceFunction : sfList) {
++            SfcProviderServiceTypeAPI.createServiceFunctionTypeEntryExecutor(serviceFunction);
++        }
++
++        for (ServiceFunction serviceFunction : sfList) {
++            Object[] parameters2 = {serviceFunction.getName()};
++            Class[] parameterTypes2 = {String.class};
++            Object result = executor.submit(SfcProviderServiceFunctionAPI
++                    .getRead(parameters2, parameterTypes2)).get();
++            ServiceFunction sf2 = (ServiceFunction) result;
++
++            assertNotNull("Must be not null", sf2);
++            assertEquals("Must be equal", sf2.getName(), serviceFunction.getName());
++            assertEquals("Must be equal", sf2.getType(), serviceFunction.getType());
++        }
++
++        Object[] parameters = {sfChain};
++        Class[] parameterTypes = {ServiceFunctionChain.class};
++
++        executor.submit(SfcProviderServiceChainAPI
++                .getPut(parameters, parameterTypes)).get();
++
++        Object[] parameters2 = {sfChain.getName()};
++        Class[] parameterTypes2 = {String.class};
++        Object result = executor.submit(SfcProviderServiceChainAPI
++                .getRead(parameters2, parameterTypes2)).get();
++        ServiceFunctionChain sfc2 = (ServiceFunctionChain) result;
++
++        assertNotNull("Must be not null", sfc2);
++        assertNotNull("Must be not null", sfChain.getSfcServiceFunction());
++        assertEquals("Must be equal", sfc2.getSfcServiceFunction(), sfChain.getSfcServiceFunction());
++        for (SfcServiceFunction sfcServiceFunction : sfChain.getSfcServiceFunction()) {
++            LOG.debug("sfcServiceFunction.name = {}", sfcServiceFunction.getName());
++            ServiceFunctionType serviceFunctionType = SfcProviderServiceTypeAPI.readServiceFunctionTypeExecutor(sfcServiceFunction.getType());
++            assertNotNull("Must be not null", serviceFunctionType);
++        }
++
++        int serviceIndex = 255;
++
++        SfcServiceFunctionShortestPathSchedulerAPI scheduler = new SfcServiceFunctionShortestPathSchedulerAPI();
++        List<String> serviceFunctionNameArrayList = scheduler.scheduleServiceFuntions(sfChain, serviceIndex);
++        assertNotNull("Must be not null", serviceFunctionNameArrayList);
++
++        Object[] parametersHop = {serviceFunctionNameArrayList.get(0)};
++        Class[] parameterTypesHop = {String.class};
++        Object resultHop = executor.submit(SfcProviderServiceFunctionAPI
++                                .getRead(parametersHop, parameterTypesHop)).get();
++        ServiceFunction sfHop0 = (ServiceFunction) resultHop;
++
++        Object[] parametersHop1 = {serviceFunctionNameArrayList.get(1)};
++        Class[] parameterTypesHop1 = {String.class};
++        Object resultHop1 = executor.submit(SfcProviderServiceFunctionAPI
++                                .getRead(parametersHop1, parameterTypesHop1)).get();
++        ServiceFunction sfHop1 = (ServiceFunction) resultHop1;
++
++        Object[] parametersHop2 = {serviceFunctionNameArrayList.get(2)};
++        Class[] parameterTypesHop2 = {String.class};
++        Object resultHop2 = executor.submit(SfcProviderServiceFunctionAPI
++                                .getRead(parametersHop2, parameterTypesHop2)).get();
++        ServiceFunction sfHop2 = (ServiceFunction) resultHop2;
++
++        assertNotNull("Must be not null", sfHop0);
++        assertNotNull("Must be not null", sfHop1);
++        assertNotNull("Must be not null", sfHop2);
++        LOG.debug("The rendered service path for chain {}: {} => {} => {}", sfChain.getName(), sfHop0.getName(), sfHop1.getName(), sfHop2.getName());
++    }
++}
